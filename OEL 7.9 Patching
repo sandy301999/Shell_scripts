@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# === COLORS ===
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log() { echo -e "[$(date '+%F %T')] $1"; }
+pass() { echo -e "${GREEN}PASS${NC} :: $1"; }
+fail() { echo -e "${RED}FAIL${NC} :: $1"; }
+warn() { echo -e "${YELLOW}WARN${NC} :: $1"; }
+
+# === 1. Check if Oracle Linux and version ===
+check_os() {
+  if [[ -f /etc/oracle-release ]]; then
+    os_version=$(awk '{print $5}' /etc/oracle-release | cut -d. -f1)
+    if [[ "$os_version" == "7" ]]; then
+      pass "Oracle Linux 7.x detected – safe to continue"
+    else
+      fail "This system is Oracle Linux ${os_version}.x – patching allowed only for OEL 7.x!"
+      exit 1
+    fi
+  else
+    fail "This is NOT Oracle Linux. Wrong workplan!"
+    exit 1
+  fi
+  sleep 5
+}
+
+# === 2. Verify RPM functionality ===
+check_rpm() {
+  log "Verifying RPM database..."
+  if rpm -qa > /dev/null 2>&1; then
+    pass "RPM database is healthy"
+  else
+    fail "RPM database is corrupt or not responding"
+    exit 1
+  fi
+  sleep 5
+}
+
+# === 3. Remove rpmnew/rpmsave files ===
+clean_rpm_files() {
+  log "Cleaning leftover .rpmnew/.rpmsave files..."
+  find /etc -name "*.rpmnew" -o -name "*.rpmsave" -exec rm -f {} \;
+  pass "Cleaned rpmnew/rpmsave files"
+  sleep 5
+}
+
+# === 4. Check /boot space ===
+check_boot_space() {
+  log "Checking /boot space..."
+  local boot_space
+  boot_space=$(df -m /boot | awk 'NR==2 {print $4}') # free space in MB
+  if [[ $boot_space -lt 75 ]]; then
+    warn "/boot has only ${boot_space}MB free. Running kernel cleanup..."
+    if [[ -f /usr/local/bin/kernel_cleanup.sh ]]; then
+      /usr/local/bin/kernel_cleanup.sh -y --purge
+    else
+      fail "Kernel cleanup script not found! Please clean manually."
+      exit 1
+    fi
+  else
+    pass "/boot space is ${boot_space}MB (OK)"
+  fi
+  sleep 5
+}
+
+# === 5. Cleanup old repo definitions ===
+clean_repos() {
+  log "Cleaning old yum repos..."
+  yum clean all
+  rm -rf /var/cache/yum/*
+  cd /etc/yum.repos.d || exit 1
+  rm -f ol7.*patchset*.repo
+  yum -y erase oraclelinux-release-el7 || true
+  yum makecache
+  yum repolist all
+  pass "Repository cleanup complete"
+  sleep 5
+}
+
+# === 6. Add latest repo ===
+add_latest_repo() {
+  log "Adding latest OL7.9 repo definition..."
+  wget -q https://taspmokcoraclerepo.cernerasp.com/yum/repos/OL_packages/OL7/7.9/wkly/ol7.9_patchset_currentweek_CTC.repo -O /etc/yum.repos.d/ol7_patchset.repo
+  yum repolist all
+  pass "Latest repo added"
+  sleep 5
+}
+
+# === 7. Perform update ===
+perform_update() {
+  log "Checking for available updates..."
+  yum check-update
+  log "Starting yum upgrade..."
+  yum upgrade -y \
+    --enablerepo=ol7_x86_64_oracle \
+    --exclude="java*" \
+    --exclude="rssh" \
+    --exclude="oracle-instantclient*" \
+    --exclude="gluster*" \
+    --exclude="zabbix*"
+  pass "System upgraded successfully"
+  sleep 5
+}
+
+# === 8. Verify kernel entry ===
+verify_kernel() {
+  log "Verifying grub entry..."
+  grubby --info=DEFAULT
+  sleep 5
+}
+
+# === MAIN EXECUTION ===
+log "===== Starting Automated Patching Process ====="
+
+check_os
+check_rpm
+clean_rpm_files
+check_boot_space
+clean_repos
+add_latest_repo
+perform_update
+verify_kernel
+
+pass "===== Patching Completed Successfully ====="
